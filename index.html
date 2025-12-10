@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<title>Фотоотчёт — автозагрузка Excel + подписи + недели</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+  body {font-family: Arial, sans-serif; background:#111; color:#eee; margin:0; padding:0; display:flex; flex-direction:column; height:100vh; overflow:hidden;}
+  h2 {margin:8px 16px; font-size:1.5em;}
+  .header {display:flex; align-items:center; padding:8px 16px; background:#1a1a1a; gap:12px; flex-wrap:nowrap;}
+  #fileInput {display:none;}
+  .info {font-size:0.9em; color:#88ee88; margin-left:auto;}
+  .header-center {display:flex; align-items:center; gap:12px; flex:1; font-weight:bold;}
+  .counter {min-width:60px;}
+  .caption {display:flex; align-items:center; gap:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .icon {width:1.1em; height:1.1em; fill:#aaa; flex-shrink:0;}
+
+  .filterWeek {background:#1a1a1a; padding:8px 16px; display:flex; gap:12px; align-items:center; border-top:1px solid #333; border-bottom:1px solid #333;}
+  .filterWeek select {padding:6px; background:#222; border:1px solid #444; color:#eee; min-width:220px;}
+  .filterWeek button {padding:6px 12px; background:#333; border:1px solid #555; cursor:pointer;}
+
+  .main {flex:1; display:flex; overflow:hidden;}
+  #sheetButtons {width:220px; background:#222; padding:10px 0; overflow-y:auto; border-right:1px solid #333;}
+  #sheetButtons button {display:block; width:90%; margin:4px auto; padding:8px 10px; background:#333; border:none; border-radius:6px; text-align:left; cursor:pointer;}
+  #sheetButtons button.active {background:#007acc;}
+  
+  #headerCaption { font-size: 0.85em; font-weight: normal; color: #ddd; }
+  #statusMsg { color:#88ee88; margin-left:12px; }
+
+  .content {flex:1; display:flex; flex-direction:column; padding:10px; overflow:hidden;}
+  #zoomContainer {flex:1; overflow:hidden; border-radius:12px; background:#000; display:flex; justify-content:center; align-items:center; cursor:grab;}
+  #mainImg {max-width:100%; max-height:100%; border-radius:8px; object-fit:contain;}
+  .zoomHint {font-size:0.75em; color:#aaa; text-align:center; padding:4px 0;}
+  .navButtons {background:#1a1a1a; padding:8px; text-align:center;}
+  #thumbs {padding:8px; background:#222; border-radius:8px; overflow-x:auto; white-space:nowrap;}
+  #thumbs img {width:80px; height:55px; margin:4px; border-radius:5px; opacity:0.7; cursor:pointer; object-fit:cover;}
+  #thumbs img.active {opacity:1; border:2px solid #007acc;}
+</style>
+</head>
+<body>
+<h2>Фотоотчёт</h2>
+
+<div class="header">
+  <div class="header-center">
+    <div class="counter" id="counter">0 / 0</div>
+    <div class="caption" id="headerCaption">—</div>
+  </div>
+  <div class="info" id="statusMsg">Загружается…</div>
+</div>
+
+<div class="filterWeek">
+  <button onclick="prevWeek()">← Предыдущая</button>
+  <label>Неделя: <select id="weekSelect" onchange="changeWeekBySelect()"></select></label>
+  <button onclick="nextWeek()">Следующая →</button>
+</div>
+
+<div class="main">
+  <div id="sheetButtons"></div>
+  <div class="content">
+    <div id="zoomContainer"><img id="mainImg" src="" alt="Фото" /></div>
+    <div class="zoomHint">Колёсико — увеличить • Перетаскивание • Двойной клик — сброс</div>
+    <div class="navButtons">
+      <button onclick="prev()">← Предыдущее</button>
+      <button onclick="next()">Следующее →</button>
+    </div>
+    <div id="thumbs"></div>
+  </div>
+</div>
+
+<script>
+/* --------------------
+   Настройки и глобал
+   -------------------- */
+let allPhotos = [], allCaptions = [], allDates = [];
+let photos = [], captions = [], dates = [];
+let index = 0;
+let weekMap = new Map();
+
+/* --------------------
+   Парсер даты (устойчиво)
+   формат ожидается: пн 01.12.2025 — 11:37:00
+   -------------------- */
+function parseDate(val) {
+  if (typeof val !== "string") return null;
+  // нормализуем NBSP и разные тире
+  val = val.replace(/\u00A0/g, " ").replace(/[–—]/g, "-").trim();
+  // допускаем возможные пробелы, вариант с коротким тире/пробелами
+  const re = /^(пн|вт|ср|чт|пт|сб|вс)\s+(\d{2})\.(\d{2})\.(\d{4})\s*[-–—]\s*(\d{2}):(\d{2}):(\d{2})$/i;
+  const m = val.match(re);
+  if (!m) return null;
+  return new Date(Number(m[4]), Number(m[3]) - 1, Number(m[2]), Number(m[5]), Number(m[6]), Number(m[7]));
+}
+
+/* --------------------
+   Помощник: нормализация пути
+   По требованию: заменяем \ на / и приводим к строчным
+   -------------------- */
+function fixPath(p) {
+  if (!p) return "";
+  return String(p).replace(/\\/g, "/").trim().toLowerCase();
+}
+
+/* --------------------
+   Автозагрузка Excel из корня (имя точь-в-точь)
+   -------------------- */
+(function autoLoad() {
+  const excelName = "journal.xlsx"; // именно такое имя в корне сайта
+  fetch(excelName)
+    .then(r => {
+      if (!r.ok) throw new Error("Ошибка сети при загрузке Excel");
+      return r.arrayBuffer();
+    })
+    .then(buf => {
+      const wb = XLSX.read(buf, {type:'array', cellDates:true});
+      document.getElementById('statusMsg').textContent = "Загружен: " + excelName;
+      buildSheetButtons(wb);
+      // Клик по первой вкладке через небольшой timeout, чтобы DOM обновился
+      setTimeout(()=> {
+        const first = document.querySelector("#sheetButtons button");
+        if (first) first.click();
+      }, 100);
+    })
+    .catch(err => {
+      console.error(err);
+      document.getElementById('statusMsg').textContent = "Ошибка загрузки Excel";
+    });
+})();
+
+/* --------------------
+   Построить кнопки вкладок
+   -------------------- */
+function buildSheetButtons(wb) {
+  const container = document.getElementById('sheetButtons');
+  container.innerHTML = "";
+  wb.SheetNames.forEach((name, i) => {
+    const b = document.createElement('button');
+    b.textContent = name;
+    b.onclick = () => loadSheet(wb.Sheets[name], b);
+    container.appendChild(b);
+  });
+}
+
+/* --------------------
+   Загрузка листа — ВСТРОЕННЫЕ подписи из нескольких колонок
+   (сохраняем логику недель)
+   -------------------- */
+function loadSheet(sheet, btn) {
+  // визуально активируем кнопку
+  document.querySelectorAll('#sheetButtons button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+
+  const rows = XLSX.utils.sheet_to_json(sheet, {defval:''});
+
+  allPhotos = []; allCaptions = []; allDates = [];
+
+  rows.forEach(r => {
+    // Ищем путь — поддерживаем разные варианты названий столбца
+    let rawPath = r['RelativePath'] || r['Ссылка на фото'] || r['Фото'] || r['File'] || r['Path'] || r['Путь'] || "";
+    if (!rawPath) return;
+
+    // Иногда в файле у тебя указано "Folder Path" + имя файла в Name, но ты сказала, что RelativePath есть — используем его.
+    let p = fixPath(rawPath);
+
+    // Подпись и отдельные поля
+    const rawCap = r['Подпись'] || "";
+    // Парсим дату из Подписи (если есть)
+    const dt = parseDate(rawCap);
+
+    // Собираем итоговую подпись: сначала очищаем исходную подпись (убираем дату/время/день недели)
+    let cap = String(rawCap)
+      .replace(/(пн|вт|ср|чт|пт|сб|вс)/gi, '')
+      .replace(/\b\d{1,2}\.\d{1,2}\.\d{4}\b/g, '')
+      .replace(/\b\d{1,2}:\d{2}(:\d{2})?\b/g, '')
+      .replace(/[–—-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // Добавляем дополнительные поля, если они есть
+    if (r['Событие']) cap += (cap ? ' | ' : '') + `Событие: ${r['Событие']}`;
+    if (r['Объект'])  cap += (cap ? ' | ' : '') + `Объект: ${r['Объект']}`;
+    if (r['Груз'])    cap += (cap ? ' | ' : '') + `Груз: ${r['Груз']}`;
+    if (r['Примечание']) cap += (cap ? ' | ' : '') + `Примечание: ${r['Примечание']}`;
+
+    allPhotos.push(p);
+    allCaptions.push(cap);
+    allDates.push(dt);
+  });
+
+  // После заполнения — строим недели и выбираем последнюю по умолчанию
+  buildWeekMap();
+  fillWeekSelect();
+
+  const keys = Array.from(weekMap.keys()).sort();
+  if (keys.length) {
+    const lastKey = keys[keys.length - 1];
+    document.getElementById('weekSelect').value = lastKey;
+    changeWeekBySelect();
+  } else {
+    // если нет дат — показываем все фото без фильтра
+    photos = [...allPhotos];
+    captions = [...allCaptions];
+    dates = [...allDates];
+    index = 0;
+    showPhoto();
+    renderThumbs();
+  }
+}
+
+/* --------------------
+   Недели — построение и навигация
+   -------------------- */
+function getMonday(d) {
+  const dt = new Date(d);
+  // переводим воскресенье (0) в 7 для корректной формулы
+  const day = dt.getDay() === 0 ? 7 : dt.getDay(); // 1..7
+  const mon = new Date(dt);
+  mon.setDate(dt.getDate() - (day - 1));
+  mon.setHours(0,0,0,0);
+  return mon;
+}
+
+function buildWeekMap() {
+  weekMap.clear();
+  allDates.forEach(dt => {
+    if (!dt) return;
+    const mon = getMonday(dt);
+    const sun = new Date(mon);
+    sun.setDate(mon.getDate() + 6);
+    sun.setHours(23,59,59,999);
+
+    const key = mon.toISOString().slice(0,10);
+    if (!weekMap.has(key)) {
+      weekMap.set(key, {mon, sun, label: `${mon.toLocaleDateString('ru-RU')} — ${sun.toLocaleDateString('ru-RU')}`});
+    }
+  });
+}
+
+function fillWeekSelect() {
+  const sel = document.getElementById('weekSelect');
+  sel.innerHTML = '';
+  const keys = Array.from(weekMap.keys()).sort();
+  keys.forEach(k => {
+    const opt = document.createElement('option');
+    opt.value = k;
+    opt.textContent = weekMap.get(k).label;
+    sel.appendChild(opt);
+  });
+}
+
+function changeWeekBySelect() {
+  const key = document.getElementById('weekSelect').value;
+  applyWeekFilter(key);
+}
+
+function prevWeek() {
+  const keys = Array.from(weekMap.keys()).sort();
+  const cur = document.getElementById('weekSelect').value;
+  const idx = keys.indexOf(cur);
+  if (idx > 0) {
+    document.getElementById('weekSelect').value = keys[idx-1];
+    applyWeekFilter(keys[idx-1]);
+  }
+}
+function nextWeek() {
+  const keys = Array.from(weekMap.keys()).sort();
+  const cur = document.getElementById('weekSelect').value;
+  const idx = keys.indexOf(cur);
+  if (idx < keys.length - 1) {
+    document.getElementById('weekSelect').value = keys[idx+1];
+    applyWeekFilter(keys[idx+1]);
+  }
+}
+
+function applyWeekFilter(weekKey) {
+  const range = weekMap.get(weekKey);
+  photos = []; captions = []; dates = [];
+  if (!range) {
+    // если недели нет — ничего не показываем
+    index = 0;
+    showPhoto();
+    renderThumbs();
+    return;
+  }
+  allDates.forEach((dt, i) => {
+    if (dt && dt >= range.mon && dt <= range.sun) {
+      photos.push(allPhotos[i]);
+      captions.push(allCaptions[i]);
+      dates.push(dt);
+    }
+  });
+  index = 0;
+  showPhoto();
+  renderThumbs();
+}
+
+/* --------------------
+   Отображение / миниатюры / навигация / зум (как было)
+   -------------------- */
+document.addEventListener("DOMContentLoaded", () => {
+  // zум и перетаскивание
+  const container = document.getElementById('zoomContainer');
+  const img = document.getElementById('mainImg');
+  let scale = 1, posX = 0, posY = 0, isDragging = false, startX = 0, startY = 0;
+
+  container.addEventListener('wheel', e => {
+    e.preventDefault();
+    scale = Math.min(Math.max(0.5, scale * (e.deltaY > 0 ? 0.9 : 1.1)), 10);
+    img.style.transform = `translate(${posX}px, ${posY}px) scale(${scale})`;
+  });
+
+  container.addEventListener('mousedown', e => {
+    if (scale <= 1) return;
+    isDragging = true;
+    startX = e.clientX - posX;
+    startY = e.clientY - posY;
+    container.classList.add('dragging');
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!isDragging) return;
+    posX = e.clientX - startX;
+    posY = e.clientY - startY;
+    img.style.transform = `translate(${posX}px, ${posY}px) scale(${scale})`;
+  });
+  document.addEventListener('mouseup', () => { isDragging = false; container.classList.remove('dragging'); });
+
+  container.addEventListener('dblclick', () => { scale = 1; posX = 0; posY = 0; img.style.transform = `translate(0px, 0px) scale(1)`; });
+});
+
+/* показать фото */
+function showPhoto() {
+  const mainImg = document.getElementById('mainImg');
+  const counter = document.getElementById('counter');
+  const header = document.getElementById('headerCaption');
+
+  if (!photos.length) {
+    mainImg.src = "";
+    counter.textContent = "0 / 0";
+    header.textContent = "—";
+    return;
+  }
+
+  mainImg.src = photos[index];
+  counter.textContent = `${index+1} / ${photos.length}`;
+
+  // подпись: показываем время + собранную подпись (если есть)
+  const dt = dates[index];
+  const cap = captions[index] || "";
+  if (dt) {
+    const day = dt.toLocaleDateString('ru-RU', {weekday:'short'});
+    const date = dt.toLocaleDateString('ru-RU');
+    const time = dt.toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+    header.innerHTML = `${day} ${date} — ${time} ${cap ? ' | ' + escapeHtml(cap) : ''}`;
+  } else {
+    header.textContent = cap || "—";
+  }
+}
+
+/* миниатюры */
+function renderThumbs() {
+  const t = document.getElementById('thumbs');
+  t.innerHTML = "";
+  photos.forEach((src,i) => {
+    const im = document.createElement('img');
+    im.src = src;
+    if (i === index) im.classList.add('active');
+    im.onclick = () => { index = i; showPhoto(); renderThumbs(); };
+    t.appendChild(im);
+  });
+}
+
+/* навигация */
+function prev() { if (!photos.length) return; index = (index - 1 + photos.length) % photos.length; showPhoto(); renderThumbs(); }
+function next() { if (!photos.length) return; index = (index + 1) % photos.length; showPhoto(); renderThumbs(); }
+
+/* утилита экранирования html в подписи (чтобы кавычки и т.п. не ломали разметку) */
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
+</script>
+</body>
+</html>
