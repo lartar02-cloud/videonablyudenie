@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8" />
-<title>Фотоотчёт — автозагрузка Excel + подписи + недели</title>
+<title>Фотоотчёт</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   body {font-family: Arial, sans-serif; background:#111; color:#eee; margin:0; padding:0; display:flex; flex-direction:column; height:100vh; overflow:hidden;}
@@ -97,7 +97,7 @@ function parseDate(val) {
    -------------------- */
 function fixPath(p) {
   if (!p) return "";
-  return String(p).replace(/\\/g, "/").trim().toLowerCase();
+  return String(p).replace(/\\/g, "/").trim();
 }
 
 /* --------------------
