@@ -161,7 +161,7 @@ function renderWeek() {
     formatRU(monday) + ' — ' + formatRU(sunday);
 
   document.querySelectorAll('tr[data-date]').forEach(row => {
-    let d = new Date(row.dataset.date);
+    let d = new Date(row.dataset.date + 'T00:00:00');
     row.style.display = (d >= monday && d <= sunday) ? '' : 'none';
   });
 }
